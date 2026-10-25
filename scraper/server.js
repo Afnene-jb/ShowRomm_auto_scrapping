@@ -1,139 +1,50 @@
 const http = require('http');
-const cheerio = require('cheerio');
 
-const SITE = 'https://www.automobile.tn';
-const BADGES = /^(Nouveau Prix|Nouveau|Promo|Disponible|Offre exclusive|Offre Flash|Madness Deals)\s+/i;
-
-// en-têtes d'un vrai navigateur (certains sites refusent les requêtes sans ça)
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml',
-  'Accept-Language': 'fr-FR,fr;q=0.9',
-};
+// API officielle et gratuite du gouvernement américain (NHTSA vPIC), sans clé
+const API = 'https://vpic.nhtsa.dot.gov/api/vehicles';
 
 const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[^a-z0-9]/g, ''); // "Mercedes-Benz" -> "mercedesbenz"
-const abs = (u) => (u ? new URL(u, SITE).href : '');
+const wiki = (text) => 'https://fr.wikipedia.org/w/index.php?search=' + encodeURIComponent(text);
 
-// tous les morceaux de texte d'un élément, séparés par un espace
-const textOf = ($, el) => $(el).find('*').addBack().contents()
-  .filter((_, n) => n.type === 'text').map((_, n) => n.data.trim()).get()
-  .filter(Boolean).join(' ').replace(/\s+/g, ' ');
-
-// Le site écrit parfois le nom deux fois ("Skoda Slavia Skoda Slavia") : on le garde une seule fois
-function cleanName(text) {
-  const w = text.split('à partir de')[0].trim().replace(BADGES, '').split(' ');
-  for (let k = Math.floor(w.length / 2); k >= 1; k--) {
-    const first = w.slice(0, w.length - k).join(' ');
-    if (first.endsWith(w.slice(-k).join(' '))) return first;
-  }
-  return w.join(' ');
+const cache = new Map(); // 1 h de cache : on ne sollicite pas l'API à chaque recherche
+async function getList(path) {
+  const hit = cache.get(path);
+  if (hit && Date.now() - hit.time < 60 * 60 * 1000) return hit.data;
+  const res = await fetch(`${API}/${path}?format=json`);
+  if (!res.ok) throw new Error(`NHTSA a répondu ${res.status}`);
+  const data = (await res.json()).Results || [];
+  cache.set(path, { time: Date.now(), data });
+  return data;
 }
 
-// Page d'accueil : voitures neuves + liste des marques
-function parseHome(html) {
-  const $ = cheerio.load(html);
-  const brands = {}; // slug -> { name, logo }
-  const cars = [];
-  $('a[href*="/fr/neuf/"]').each((_, a) => {
-    const link = abs($(a).attr('href'));
-    const parts = new URL(link).pathname.split('/'); // ['', 'fr', 'neuf', marque, modèle...]
-    const img = $(a).find('img').first();
-    if (parts.length === 4) { // lien d'une marque : /fr/neuf/audi
-      if (img.length) brands[parts[3]] = { name: img.attr('alt') || parts[3], logo: abs(img.attr('src')) };
-      return;
-    }
-    const text = textOf($, a);
-    const price = text.match(/à partir de\s*([\d\s.]+?)\s*DT/i);
-    if (!price || cars.some((c) => c.link === link)) return;
-    cars.push({
-      type: 'Neuf', name: cleanName(text), price: price[1].trim() + ' DT', info: 'À partir de',
-      image: abs(img.attr('data-src') || img.attr('src')), link, brand: parts[3],
-    });
-  });
-  cars.forEach((c) => { c.image = c.image || (brands[c.brand] || {}).logo || ''; });
-  return { cars, brands };
-}
-
-// Page d'annonces d'occasion
-function parseUsed(html) {
-  const $ = cheerio.load(html);
-  const total = +(($.text().match(/Afficher\s+(\d+)\s+annonces/) || [])[1] || 0);
-  const cars = [];
-  $('a').each((_, a) => {
-    const link = abs($(a).attr('href'));
-    if (!/\/fr\/occasion\/(s=[^/]*\/)?[^/]+\/[^/]+\/\d+$/.test(link) || cars.some((c) => c.link === link)) return;
-    // la carte = le plus petit parent du lien qui contient un titre h2
-    let card = $(a).parent();
-    while (card.length && !card.find('h2').length) card = card.parent();
-    if (card.find('h2').length !== 1) return;
-
-    const li = card.find('li').map((_, x) => $(x).text().replace(/\s+/g, ' ').trim()).get();
-    const prices = [...textOf($, card).matchAll(/(\d[\d\s]*)DT/g)];
-    const img = card.find('img').first();
-    cars.push({
-      type: 'Occasion', name: card.find('h2').text().trim(),
-      price: prices.length ? prices[prices.length - 1][1].trim() + ' DT' : '',
-      info: [li[0], li[1], li[5], li[2]].filter(Boolean).join(' • '), // km, année, énergie, boîte
-      image: abs(img.attr('data-src') || img.attr('src')), link,
-    });
-  });
-  return { total, cars };
-}
-
-const cache = new Map(); // 10 min de cache : on ne sollicite pas le site à chaque recherche
-async function get(url) {
-  const hit = cache.get(url);
-  if (hit && Date.now() - hit.time < 10 * 60 * 1000) return hit.html;
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`automobile.tn a répondu ${res.status} pour ${url}`);
-  const html = await res.text();
-  cache.set(url, { time: Date.now(), html });
-  return html;
-}
-
-async function usedCars(base, maxPages) {
-  const first = parseUsed(await get(`${base}/1`));
-  if (!first.cars.length) return [];
-  const pages = Math.min(maxPages, Math.ceil(first.total / first.cars.length));
-  const others = await Promise.all(
-    Array.from({ length: pages - 1 }, (_, i) => get(`${base}/${i + 2}`).then(parseUsed)));
-  return [first, ...others].flatMap((p) => p.cars);
-}
-
-// q = "audi", "audi q5", "clio"... (vide = un aperçu de tout)
+// q = "audi", "audi a4", "toy"... (vide = la liste des marques)
 async function search(q) {
   const words = q.split(/\s+/).map(norm).filter(Boolean);
-  const match = (name) => words.every((w) => norm(name).includes(w));
-  const home = parseHome(await get(`${SITE}/fr`));
-  const neuf = home.cars.filter((c) => match(c.name));
+  const makes = [...new Set((await getList('GetMakesForVehicleType/car')).map((m) => m.MakeName || m.Make_Name))].sort();
 
-  // marques dont on va chercher les occasions
-  let slugs = [];
-  if (words.length) {
-    slugs = Object.keys(home.brands).filter((s) => norm(home.brands[s].name).startsWith(words[0]));
-    if (!slugs.length) slugs = [...new Set(neuf.map((c) => c.brand))];
-    if (!slugs.length) slugs = [q.trim().split(/\s+/)[0].toLowerCase()];
+  if (!words.length) {
+    return makes.slice(0, 48).map((make) => ({
+      type: 'Marque', name: make, info: 'Tapez son nom pour voir ses modèles', link: wiki(make),
+    }));
   }
-  const bases = words.length
-    ? slugs.slice(0, 2).map((s) => `${SITE}/fr/occasion/s=brand!:${s}`)
-    : [`${SITE}/fr/occasion/s=`];
-  const used = (await Promise.all(bases.map((b) => usedCars(b, words.length ? 8 : 3).catch(() => []))))
-    .flat().filter((c) => match(c.name));
-  return [...neuf, ...used];
-}
 
-// Diagnostic : /api/search?debug=1 montre ce que le serveur reçoit vraiment d'automobile.tn
-async function diag(url, parse) {
-  const r = await fetch(url, { headers: HEADERS });
-  const html = await r.text();
-  return {
-    url, status: r.status, longueur: html.length,
-    titre: (html.match(/<title>([^<]*)/) || [])[1],
-    liensNeuf: (html.match(/\/fr\/neuf\//g) || []).length,
-    liensOccasion: (html.match(/\/fr\/occasion\//g) || []).length,
-    voituresTrouvees: parse(html).cars.length,
-    debut: html.slice(0, 200).replace(/\s+/g, ' '),
-  };
+  // le premier mot = la marque, les suivants filtrent les modèles
+  let found = makes.filter((m) => norm(m).startsWith(words[0]));
+  if (!found.length) found = makes.filter((m) => norm(m).includes(words[0]));
+  found = found.slice(0, 3);
+
+  const lists = await Promise.all(found.map((m) => getList(`getmodelsformake/${encodeURIComponent(m)}`)));
+  const seen = new Set();
+  const models = [];
+  lists.flat().forEach((r) => {
+    const make = r.Make_Name, model = r.Model_Name;
+    if (!found.includes(make) || seen.has(make + model)) return; // l'API renvoie parfois des marques voisines
+    if (!words.slice(1).every((w) => norm(model).includes(w))) return;
+    seen.add(make + model);
+    models.push({ type: 'Modèle', name: `${make} ${model}`, info: `Marque : ${make}`, link: wiki(`${make} ${model}`) });
+  });
+  models.sort((a, b) => a.name.localeCompare(b.name));
+  return models.slice(0, 200);
 }
 
 // Fonction appelée à chaque requête (par Vercel, ou par le serveur local ci-dessous)
@@ -141,14 +52,7 @@ async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   try {
-    const params = new URL(req.url, 'http://localhost').searchParams;
-    if (params.has('debug')) {
-      return res.end(JSON.stringify([
-        await diag(`${SITE}/fr`, parseHome),
-        await diag(`${SITE}/fr/occasion/s=brand!:audi/1`, parseUsed),
-      ], null, 2));
-    }
-    const q = params.get('q') || '';
+    const q = new URL(req.url, 'http://localhost').searchParams.get('q') || '';
     res.end(JSON.stringify(await search(q)));
   } catch (e) {
     res.statusCode = 500;
@@ -163,6 +67,4 @@ if (require.main === module) {
 }
 
 module.exports = handler; // Vercel utilise cette fonction
-module.exports.parseHome = parseHome;
-module.exports.parseUsed = parseUsed;
 module.exports.search = search;

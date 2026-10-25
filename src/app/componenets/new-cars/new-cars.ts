@@ -6,12 +6,10 @@ import { BehaviorSubject, catchError, debounceTime, distinctUntilChanged, of, st
 // en local : scraper lancé sur votre PC (npm start) ; une fois en ligne sur Vercel : le scraper est servi sur /api
 const SCRAPER_URL = isDevMode() ? 'http://localhost:3000' : '/api/search';
 
-interface ScrapedCar {
-  type: string; // Neuf ou Occasion
+interface CatalogItem {
+  type: string; // Marque ou Modèle
   name: string;
-  price: string;
   info: string;
-  image: string;
   link: string;
 }
 
@@ -35,8 +33,8 @@ export class NewCars {
     debounceTime(400),
     distinctUntilChanged(),
     switchMap((q) =>
-      this.http.get<ScrapedCar[]>(SCRAPER_URL, { params: { q } }).pipe(
-        catchError(() => of([] as ScrapedCar[])),
+      this.http.get<CatalogItem[]>(SCRAPER_URL, { params: { q } }).pipe(
+        catchError(() => of([] as CatalogItem[])),
         startWith(null),
       ),
     ),
