@@ -4,6 +4,13 @@ const cheerio = require('cheerio');
 const SITE = 'https://www.automobile.tn';
 const BADGES = /^(Nouveau Prix|Nouveau|Promo|Disponible|Offre exclusive|Offre Flash|Madness Deals)\s+/i;
 
+// en-têtes d'un vrai navigateur (certains sites refusent les requêtes sans ça)
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml',
+  'Accept-Language': 'fr-FR,fr;q=0.9',
+};
+
 const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[^a-z0-9]/g, ''); // "Mercedes-Benz" -> "mercedesbenz"
 const abs = (u) => (u ? new URL(u, SITE).href : '');
 
@@ -77,7 +84,8 @@ const cache = new Map(); // 10 min de cache : on ne sollicite pas le site à cha
 async function get(url) {
   const hit = cache.get(url);
   if (hit && Date.now() - hit.time < 10 * 60 * 1000) return hit.html;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) throw new Error(`automobile.tn a répondu ${res.status} pour ${url}`);
   const html = await res.text();
   cache.set(url, { time: Date.now(), html });
   return html;
@@ -114,12 +122,33 @@ async function search(q) {
   return [...neuf, ...used];
 }
 
+// Diagnostic : /api/search?debug=1 montre ce que le serveur reçoit vraiment d'automobile.tn
+async function diag(url, parse) {
+  const r = await fetch(url, { headers: HEADERS });
+  const html = await r.text();
+  return {
+    url, status: r.status, longueur: html.length,
+    titre: (html.match(/<title>([^<]*)/) || [])[1],
+    liensNeuf: (html.match(/\/fr\/neuf\//g) || []).length,
+    liensOccasion: (html.match(/\/fr\/occasion\//g) || []).length,
+    voituresTrouvees: parse(html).cars.length,
+    debut: html.slice(0, 200).replace(/\s+/g, ' '),
+  };
+}
+
 // Fonction appelée à chaque requête (par Vercel, ou par le serveur local ci-dessous)
 async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   try {
-    const q = new URL(req.url, 'http://localhost').searchParams.get('q') || '';
+    const params = new URL(req.url, 'http://localhost').searchParams;
+    if (params.has('debug')) {
+      return res.end(JSON.stringify([
+        await diag(`${SITE}/fr`, parseHome),
+        await diag(`${SITE}/fr/occasion/s=brand!:audi/1`, parseUsed),
+      ], null, 2));
+    }
+    const q = params.get('q') || '';
     res.end(JSON.stringify(await search(q)));
   } catch (e) {
     res.statusCode = 500;
