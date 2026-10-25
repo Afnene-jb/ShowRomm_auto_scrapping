@@ -10,7 +10,7 @@ interface CatalogItem {
   type: string; // Marque ou Modèle
   name: string;
   info: string;
-  link: string;
+  image: string;
 }
 
 @Component({

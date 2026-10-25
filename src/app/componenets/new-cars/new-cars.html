@@ -5,17 +5,21 @@
 } @else if (cars.length === 0) {
   <p class="msg">Aucun résultat. Vérifiez que le serveur du dossier scraper est lancé (<code>npm start</code>).</p>
 } @else {
-  <p class="msg">{{ cars.length }} résultats (source : NHTSA vPIC)</p>
+  <p class="msg">{{ cars.length }} résultats · Données : NHTSA vPIC · Photos : Wikipédia</p>
 }
 <div class="cars-container">
-  @for (car of cars; track car.link) {
+  @for (car of cars; track car.name) {
     <div class="auto-card">
       <span class="tag">{{ car.type }}</span>
+      @if (car.image) {
+        <img [src]="car.image" [alt]="car.name" loading="lazy" />
+      } @else {
+        <div class="no-photo">{{ car.name[0] }}</div>
+      }
       <div class="details">
         <h3>{{ car.name }}</h3>
         <p>{{ car.info }}</p>
       </div>
-      <a [href]="car.link" target="_blank">Voir sur Wikipédia</a>
     </div>
   }
 </div>
